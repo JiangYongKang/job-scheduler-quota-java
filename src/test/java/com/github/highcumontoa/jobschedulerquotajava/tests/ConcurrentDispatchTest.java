@@ -26,6 +26,10 @@ class ConcurrentDispatchTest {
     @Test
     void sameJobDispatchedExactlyOnceUnderConcurrentTicks() throws Exception {
         try (TestHarness h = new TestHarness(60_000, 3)) {
+            // 本用例验证"无抢占需求时并发调度结论与既有完全一致"：显式关闭抢占
+            // （场景内槽位稀缺且优先级混杂，若开启抢占，被抢任务重排队会被再次下发，
+            //   "每任务恰好下发一次"将不再成立——那是抢占语义本身，而非并发缺陷）。
+            h.props.setPreemptionMaxPerJob(0);
             h.limit("team-a", 100, 100, 100);
             int jobCount = 20;
             for (int i = 0; i < jobCount; i++) {

@@ -44,10 +44,16 @@ class CancelConcurrencyTest {
                 AtomicInteger cancelRejected = new AtomicInteger();
                 AtomicInteger reportOk = new AtomicInteger();
                 AtomicInteger reportRejected = new AtomicInteger();
+                // 可复现的交错：偶数轮让回传线程先行、奇数轮让取消线程先行（固定 3ms 错位），
+                // 两种赢家都由构造保证出现，不依赖随机时序；竞争本身仍然真实（两线程并发在飞）。
+                boolean reportFirst = (r % 2 == 0);
+                long cancelDelayMs = reportFirst ? 3 : 0;
+                long reportDelayMs = reportFirst ? 0 : 3;
                 // 取消线程
                 Thread canceller = new Thread(() -> {
                     try {
                         start.await();
+                        Thread.sleep(cancelDelayMs);
                         h.jobService.cancel(jobId);
                         cancelOk.incrementAndGet();
                     } catch (JobRejectedException e) {
@@ -56,11 +62,11 @@ class CancelConcurrencyTest {
                         Thread.currentThread().interrupt();
                     }
                 });
-                // 回传线程（竞争开始时读取当前有效租约；故意随机延迟打乱两个操作的先后）
+                // 回传线程（竞争开始时读取当前有效租约）
                 Thread reporter = new Thread(() -> {
                     try {
                         start.await();
-                        Thread.sleep((long) (Math.random() * 5));
+                        Thread.sleep(reportDelayMs);
                         String leaseId = h.jobService.get(jobId).leaseId();
                         h.jobService.report(new JobResult(jobId, leaseId, h.executor.getId(), true, "并发回传"));
                         reportOk.incrementAndGet();
@@ -101,7 +107,7 @@ class CancelConcurrencyTest {
         log.info("[test] 取消vs回传并发 {} 轮: 取消先生效={} 回传先生效={} 判定依据=任务锁串行化,结论唯一,配额只归还一次",
                 runs, cancelledWon, succeededWon);
         assertTrue(cancelledWon > 0 && succeededWon > 0,
-                "随机交错下两种赢家都应出现过，以证明竞争真实存在");
+                "确定性交错下两种赢家都应出现(各约一半)，以证明竞争真实存在");
     }
 
     @Test

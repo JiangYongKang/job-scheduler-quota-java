@@ -121,6 +121,38 @@ public class QuotaService {
         }
     }
 
+    /**
+     * 静默预判：当前占用 + demand 是否在限内（不记日志、不改账）。
+     * 供调度器判断"任务此刻是否被配额卡住"，真正的硬隔离仍是 {@link #tryAcquire}。
+     */
+    public boolean wouldFit(String subject, ResourceQuota demand) {
+        synchronized (lockOf(subject)) {
+            ResourceQuota limit = limits.getOrDefault(subject, defaultLimit);
+            if (limit == null) {
+                return true;
+            }
+            return !exceeds(used.getOrDefault(subject, ResourceQuota.ZERO), demand, limit);
+        }
+    }
+
+    /**
+     * 静默预判：若 victim 的占用被释放，preemptor 是否放得下。
+     * 只有同主体时 victim 的释放才惠及 preemptor；不同主体只看当前余量。
+     */
+    public boolean wouldFitAfterRelease(Job preemptor, Job victim) {
+        String subject = preemptor.getSubject();
+        synchronized (lockOf(subject)) {
+            ResourceQuota limit = limits.getOrDefault(subject, defaultLimit);
+            if (limit == null) {
+                return true;
+            }
+            ResourceQuota current = used.getOrDefault(subject, ResourceQuota.ZERO);
+            ResourceQuota freed = subject.equals(victim.getSubject()) ? victim.getDemand() : ResourceQuota.ZERO;
+            ResourceQuota after = current.minus(freed);
+            return !exceeds(after, preemptor.getDemand(), limit);
+        }
+    }
+
     public ResourceQuota getUsed(String subject) {
         synchronized (lockOf(subject)) {
             return used.getOrDefault(subject, ResourceQuota.ZERO);

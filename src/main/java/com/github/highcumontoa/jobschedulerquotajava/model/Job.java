@@ -25,6 +25,13 @@ public class Job {
     /** 该任务的配额当前是否已计入"占用中"，用于保证配额只发放/归还一次。 */
     private volatile boolean quotaHeld;
 
+    /**
+     * 被高优先级任务抢占的次数。被抢占不消耗失败重试预算（抢占时回滚 attempt），
+     * 但达到 scheduler.preemption-max-per-job 后获得"抢占免疫"，不再被选为被抢对象，
+     * 避免低优先级任务被没完没了地抢占而饿死。
+     */
+    private volatile int preemptedCount;
+
     /** 调度公平性：同一主体连续被选中的序号依据（由调度器维护，仅作可读记录）。 */
     private final AtomicInteger scheduleSequence = new AtomicInteger(0);
 
@@ -70,6 +77,9 @@ public class Job {
     public boolean isQuotaHeld() { return quotaHeld; }
     public void setQuotaHeld(boolean quotaHeld) { this.quotaHeld = quotaHeld; }
 
+    public int getPreemptedCount() { return preemptedCount; }
+    public void setPreemptedCount(int preemptedCount) { this.preemptedCount = preemptedCount; }
+
     public AtomicInteger getScheduleSequence() { return scheduleSequence; }
 
     public boolean isTerminal() {
@@ -80,6 +90,7 @@ public class Job {
     public JobSnapshot snapshot() {
         return new JobSnapshot(jobId, subject, demand, priority, state.name(), attempt, maxRetries,
                 lease == null ? null : lease.leaseId(), lease == null ? null : lease.executorId(),
-                terminalReason == null ? null : terminalReason.name(), resultDetail, quotaHeld, createdAt);
+                terminalReason == null ? null : terminalReason.name(), resultDetail, quotaHeld,
+                preemptedCount, createdAt);
     }
 }

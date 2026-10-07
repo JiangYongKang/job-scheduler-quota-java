@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -35,6 +36,19 @@ public class LocalTaskExecutor implements TaskExecutor {
 
     private final String id = "exec-" + UUID.randomUUID().toString().substring(0, 8);
     private final AtomicInteger inFlight = new AtomicInteger(0);
+
+    /**
+     * 一个租约对应的工作线程句柄。槽位归还与"抢占移交"在句柄锁内互斥：
+     * 工作线程结束时若槽位已被调度器征用（transferred），则不再自行归还，避免重复计数。
+     */
+    private static final class WorkerHandle {
+        volatile Thread thread;
+        volatile boolean done;
+        volatile boolean transferred;
+    }
+
+    /** leaseId -> 工作线程句柄。 */
+    private final ConcurrentHashMap<String, WorkerHandle> handles = new ConcurrentHashMap<>();
 
     @Value("${scheduler.local-executor.parallelism:4}")
     private int parallelism;
@@ -93,10 +107,63 @@ public class LocalTaskExecutor implements TaskExecutor {
 
     @Override
     public void submit(Job job, Lease lease) {
-        pool.submit(() -> run(job, lease));
+        WorkerHandle handle = new WorkerHandle();
+        handles.put(lease.leaseId(), handle);
+        pool.submit(() -> {
+            handle.thread = Thread.currentThread();
+            run(job, lease, handle);
+        });
     }
 
-    private void run(Job job, Lease lease) {
+    @Override
+    public boolean seizeSlot(String leaseId) {
+        WorkerHandle handle = handles.get(leaseId);
+        if (handle == null) {
+            return false;
+        }
+        synchronized (handle) {
+            if (handle.done || handle.transferred) {
+                // 工作线程已完成槽位记账，或槽位已被其他调度线程征用：无法（重复）移交。
+                return false;
+            }
+            handle.transferred = true;
+            log.info("[exec-slot-seized] executor={} leaseId={} 判定依据=槽位被调度器征用,工作线程结束时不再自行归还",
+                    id, leaseId);
+            return true;
+        }
+    }
+
+    @Override
+    public void interruptWorker(String leaseId) {
+        WorkerHandle handle = handles.get(leaseId);
+        if (handle != null) {
+            Thread t = handle.thread;
+            if (t != null) {
+                t.interrupt();
+            }
+        }
+    }
+
+    private void run(Job job, Lease lease, WorkerHandle handle) {
+        try {
+            runTask(job, lease);
+        } finally {
+            handles.remove(lease.leaseId());
+            synchronized (handle) {
+                handle.done = true;
+                if (!handle.transferred) {
+                    releaseSlot();
+                    log.info("[exec-finish] executor={} jobId={} leaseId={} inFlight={}",
+                            id, job.getJobId(), lease.leaseId(), inFlight.get());
+                } else {
+                    log.info("[exec-finish] executor={} jobId={} leaseId={} inFlight={} 判定依据=槽位已移交给抢占者,本线程不再归还",
+                            id, job.getJobId(), lease.leaseId(), inFlight.get());
+                }
+            }
+        }
+    }
+
+    private void runTask(Job job, Lease lease) {
         String payload = job.getPayload() == null ? "" : job.getPayload();
         log.info("[exec-start] executor={} jobId={} leaseId={} attempt={} payload={} inFlight={}",
                 id, job.getJobId(), lease.leaseId(), lease.attempt(), payload, inFlight.get());
@@ -137,13 +204,9 @@ public class LocalTaskExecutor implements TaskExecutor {
             log.info("[exec-report] executor={} jobId={} leaseId={} success={} 回传已被接受",
                     id, job.getJobId(), lease.leaseId(), result.success());
         } catch (RuntimeException ex) {
-            // 回传被拒（租约已过期/已取消/已终结）：结论以域服务为准，执行者只记录，不改变任何状态。
+            // 回传被拒（租约已过期/已取消/已终结/已被抢占）：结论以域服务为准，执行者只记录，不改变任何状态。
             log.info("[exec-report-rejected] executor={} jobId={} leaseId={} 判定依据={}",
                     id, job.getJobId(), lease.leaseId(), ex.getMessage());
-        } finally {
-            releaseSlot();
-            log.info("[exec-finish] executor={} jobId={} leaseId={} inFlight={}",
-                    id, job.getJobId(), lease.leaseId(), inFlight.get());
         }
     }
 

@@ -15,5 +15,6 @@ public record JobSnapshot(String jobId,
                           String terminalReason,
                           String resultDetail,
                           boolean quotaHeld,
+                          int preemptedCount,
                           long createdAt) {
 }
