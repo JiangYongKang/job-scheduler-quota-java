@@ -17,6 +17,9 @@ public class SchedulerProperties {
     /** 后台调度扫描间隔（毫秒），<=0 表示关闭后台线程（测试中手动驱动）。 */
     private long tickIntervalMs = 0;
 
+    /** 同一任务最多被抢占的次数；达到后获得抢占免疫（防饿死），<=0 表示不允许抢占。 */
+    private int maxPreemptionsPerJob = 3;
+
     public long getLeaseTtlMs() { return leaseTtlMs; }
     public void setLeaseTtlMs(long leaseTtlMs) { this.leaseTtlMs = leaseTtlMs; }
 
@@ -25,4 +28,7 @@ public class SchedulerProperties {
 
     public long getTickIntervalMs() { return tickIntervalMs; }
     public void setTickIntervalMs(long tickIntervalMs) { this.tickIntervalMs = tickIntervalMs; }
+
+    public int getMaxPreemptionsPerJob() { return maxPreemptionsPerJob; }
+    public void setMaxPreemptionsPerJob(int maxPreemptionsPerJob) { this.maxPreemptionsPerJob = maxPreemptionsPerJob; }
 }

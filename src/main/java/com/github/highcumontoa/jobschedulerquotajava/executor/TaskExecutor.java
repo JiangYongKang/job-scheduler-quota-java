@@ -24,4 +24,13 @@ public interface TaskExecutor {
 
     /** 在已占用槽位的前提下异步执行任务，完成后回传结果。 */
     void submit(Job job, Lease lease);
+
+    /**
+     * 抢占支持：把 jobId 当前占用槽位的"账目归属"原子地移交给调度器（用于高优先级抢占）。
+     * 成功返回 true：该槽位计数不变、归调用方支配（原任务的工作线程不会再归还它，
+     * 并被尽力中断）；返回 false 表示该任务已不在本执行者上运行（槽位已被正常归还）。
+     */
+    default boolean transferSlot(String jobId) {
+        return false;
+    }
 }

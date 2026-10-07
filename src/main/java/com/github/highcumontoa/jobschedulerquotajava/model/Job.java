@@ -25,6 +25,9 @@ public class Job {
     /** 该任务的配额当前是否已计入"占用中"，用于保证配额只发放/归还一次。 */
     private volatile boolean quotaHeld;
 
+    /** 被高优先级任务抢占的次数（防饿死依据：达到上限后获得抢占免疫）。 */
+    private volatile int preemptedCount;
+
     /** 调度公平性：同一主体连续被选中的序号依据（由调度器维护，仅作可读记录）。 */
     private final AtomicInteger scheduleSequence = new AtomicInteger(0);
 
@@ -69,6 +72,9 @@ public class Job {
 
     public boolean isQuotaHeld() { return quotaHeld; }
     public void setQuotaHeld(boolean quotaHeld) { this.quotaHeld = quotaHeld; }
+
+    public int getPreemptedCount() { return preemptedCount; }
+    public void setPreemptedCount(int preemptedCount) { this.preemptedCount = preemptedCount; }
 
     public AtomicInteger getScheduleSequence() { return scheduleSequence; }
 

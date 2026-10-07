@@ -18,6 +18,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * 场景 3：并发调度同一任务。
  * 多个调度线程同时 tick 时，同一 PENDING 任务只能被一个线程迁移到 RUNNING 并下发，
  * 配额也只能发放一次（不会重复占用、不会出现两个执行者同时拿到同一租约）。
+ *
+ * 注：全部任务使用相同优先级，即"无抢占需求"场景（等待任务优先级不高于运行任务），
+ * 此场景下不允许发生任何抢占，行为与引入抢占能力前完全一致；
+ * 抢占语义本身由 PreemptionTest 专门覆盖。
  */
 class ConcurrentDispatchTest {
 
@@ -29,8 +33,9 @@ class ConcurrentDispatchTest {
             h.limit("team-a", 100, 100, 100);
             int jobCount = 20;
             for (int i = 0; i < jobCount; i++) {
+                // 统一优先级：等待任务永远不会比运行任务优先级更高，抢占不会被触发。
                 h.jobService.submit(new SubmitRequest(
-                        "job-" + i, "team-a", new ResourceQuota(1, 1, 1), i % 5, "sleep:120"));
+                        "job-" + i, "team-a", new ResourceQuota(1, 1, 1), 5, "sleep:120"));
             }
 
             int schedulers = 8;

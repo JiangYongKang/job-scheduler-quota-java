@@ -24,12 +24,52 @@ class CancelConcurrencyTest {
 
     private static final Logger log = LoggerFactory.getLogger(CancelConcurrencyTest.class);
 
+    /**
+     * 取消与回传竞争，结论唯一。
+     * 分三部分，全部确定性可复现（不依赖随机时序）：
+     * 1) 取消先到：取消生效，随后的回传被拒；
+     * 2) 回传先到：回传生效，随后的取消被拒；
+     * 3) 50 轮真并发竞速：每轮恰好一个生效、终态唯一、配额只归还一次。
+     */
     @Test
     void cancelAndReportRaceProducesUniqueOutcome() throws Exception {
+        // 阶段 1：取消先到（确定性顺序）
+        try (TestHarness h = new TestHarness(60_000, 3)) {
+            h.limit("team-a", 100, 100, 100);
+            h.jobService.submit(new SubmitRequest("cancel-first", "team-a",
+                    new ResourceQuota(1, 1, 1), 5, "never"));
+            h.scheduler.tick();
+            String leaseId = h.jobService.get("cancel-first").leaseId();
+            h.jobService.cancel("cancel-first");
+            assertEquals("CANCELLED", h.jobService.get("cancel-first").state());
+            JobRejectedException ex = assertThrows(JobRejectedException.class, () -> h.jobService.report(
+                    new JobResult("cancel-first", leaseId, h.executor.getId(), true, "迟到的回传")));
+            log.info("[test] 取消先到: 回传被拒 reason={} 判定依据=任务锁串行化,取消生效后回传必败", ex.getMessage());
+            assertEquals("CANCELLED", h.jobService.get("cancel-first").state());
+            assertEquals(ResourceQuota.ZERO, h.jobService.getUsedQuota("team-a"));
+        }
+
+        // 阶段 2：回传先到（确定性顺序）
+        try (TestHarness h = new TestHarness(60_000, 3)) {
+            h.limit("team-a", 100, 100, 100);
+            h.jobService.submit(new SubmitRequest("report-first", "team-a",
+                    new ResourceQuota(1, 1, 1), 5, "never"));
+            h.scheduler.tick();
+            String leaseId = h.jobService.get("report-first").leaseId();
+            h.jobService.report(new JobResult("report-first", leaseId, h.executor.getId(), true, "先到的回传"));
+            assertEquals("SUCCEEDED", h.jobService.get("report-first").state());
+            JobRejectedException ex = assertThrows(JobRejectedException.class,
+                    () -> h.jobService.cancel("report-first"));
+            log.info("[test] 回传先到: 取消被拒 reason={} 判定依据=任务锁串行化,回传生效后取消必败", ex.getMessage());
+            assertEquals("SUCCEEDED", h.jobService.get("report-first").state());
+            assertEquals(ResourceQuota.ZERO, h.jobService.getUsedQuota("team-a"));
+        }
+
+        // 阶段 3：50 轮真并发竞速——两个线程同一起跑线竞争，每轮断言"恰好一个生效"。
+        // 断言在任何交错下都成立，因此反复运行稳定通过。
         int runs = 50;
         int cancelledWon = 0;
         int succeededWon = 0;
-
         for (int r = 0; r < runs; r++) {
             try (TestHarness h = new TestHarness(60_000, 3)) {
                 h.limit("team-a", 100, 100, 100);
@@ -38,13 +78,14 @@ class CancelConcurrencyTest {
                         new ResourceQuota(1, 1, 1), 5, "never"));
                 h.scheduler.tick();
                 assertEquals("RUNNING", h.jobService.get(jobId).state());
+                String leaseId = h.jobService.get(jobId).leaseId();
 
                 CountDownLatch start = new CountDownLatch(1);
                 AtomicInteger cancelOk = new AtomicInteger();
                 AtomicInteger cancelRejected = new AtomicInteger();
                 AtomicInteger reportOk = new AtomicInteger();
                 AtomicInteger reportRejected = new AtomicInteger();
-                // 取消线程
+                AtomicReference<Throwable> error = new AtomicReference<>();
                 Thread canceller = new Thread(() -> {
                     try {
                         start.await();
@@ -52,22 +93,19 @@ class CancelConcurrencyTest {
                         cancelOk.incrementAndGet();
                     } catch (JobRejectedException e) {
                         cancelRejected.incrementAndGet();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
+                    } catch (Throwable t) {
+                        error.compareAndSet(null, t);
                     }
                 });
-                // 回传线程（竞争开始时读取当前有效租约；故意随机延迟打乱两个操作的先后）
                 Thread reporter = new Thread(() -> {
                     try {
                         start.await();
-                        Thread.sleep((long) (Math.random() * 5));
-                        String leaseId = h.jobService.get(jobId).leaseId();
                         h.jobService.report(new JobResult(jobId, leaseId, h.executor.getId(), true, "并发回传"));
                         reportOk.incrementAndGet();
                     } catch (JobRejectedException e) {
                         reportRejected.incrementAndGet();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
+                    } catch (Throwable t) {
+                        error.compareAndSet(null, t);
                     }
                 });
                 canceller.start();
@@ -75,6 +113,7 @@ class CancelConcurrencyTest {
                 start.countDown();
                 canceller.join();
                 reporter.join();
+                assertNull(error.get(), "run=" + r + " 并发取消/回传不应产生异常");
 
                 String finalState = h.jobService.get(jobId).state();
 
@@ -100,8 +139,6 @@ class CancelConcurrencyTest {
         }
         log.info("[test] 取消vs回传并发 {} 轮: 取消先生效={} 回传先生效={} 判定依据=任务锁串行化,结论唯一,配额只归还一次",
                 runs, cancelledWon, succeededWon);
-        assertTrue(cancelledWon > 0 && succeededWon > 0,
-                "随机交错下两种赢家都应出现过，以证明竞争真实存在");
     }
 
     @Test
